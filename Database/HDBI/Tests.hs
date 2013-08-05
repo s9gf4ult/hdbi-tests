@@ -95,7 +95,7 @@ createTables tf con = do
     ,("localtimeofdays", tfLocalTimeOfDay)
     ,("localtimes", tfLocalTime)
     ]
-  recreateTable "intdec" [tfInteger tf, tfDecimal tf]
+  recreateTable "intdecs" [tfInteger tf, tfDecimal tf]
   recreateTable "intublobs" [tfInteger tf, tfUUID tf, tfBlob tf]
   recreateTable "table1" [tfInteger tf, tfInteger tf, tfInteger tf]
   where
@@ -134,13 +134,13 @@ insertSelectTests c = testGroup "Can insert and select"
            , testProperty "Maybe Integer" $ \(val :: Maybe Integer) -> preciseEqual c "integers" val
            , testProperty "Maybe ByteString" $ \(val :: Maybe B.ByteString) -> preciseEqual c "blobs" val
            , testProperty "Insert many numbers"
-             $ \(x :: [(Integer, Decimal)]) -> setsEqual c "intdecs" x
+             $ \(x :: [(Integer, Decimal)]) -> setsEqual c "intdecs" 2 x
            , testProperty "Insert many text"
-             $ \(x :: [(Maybe Integer, UUID, Maybe B.ByteString)]) -> setsEqual c "intublobs" x
+             $ \(x :: [(Maybe Integer, UUID, Maybe B.ByteString)]) -> setsEqual c "intublobs" 3 x
            ]
 
-setsEqual :: (Connection con, SqlRow row, Eq row, Ord row, Show row) => con -> Query -> [row] -> Property
-setsEqual conn tname values = QM.monadicIO $ do
+setsEqual :: (Connection con, SqlRow row, Eq row, Ord row, Show row) => con -> Query -> Int -> [row] -> Property
+setsEqual conn tname vcount values = QM.monadicIO $ do
   ret <- QM.run $ withTransaction conn $ do
     runRaw conn $ "delete from " <> tname
     runMany conn ("insert into " <> tname <> "(" <> valnames <> ") values (" <> qmarks <> ")")
@@ -153,9 +153,9 @@ setsEqual conn tname values = QM.monadicIO $ do
   QM.stop $ (S.fromList values) ==? (S.fromList ret)
   where
     valnames = Query $ TL.pack $ intercalate ", "
-               $ map (\c -> "val" ++ show c) [1..length values]
+               $ map (\c -> "val" ++ show c) [1..vcount]
     qmarks = Query $ TL.pack $ intercalate ", "
-             $ replicate (length values) "?"
+             $ replicate vcount "?"
 
 preciseEqual :: (Eq a, Show a, FromSql a, ToSql a, Connection con) => con -> Query -> a -> Property
 preciseEqual conn tname val = QM.monadicIO $ do
