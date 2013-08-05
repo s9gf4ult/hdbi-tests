@@ -47,7 +47,7 @@ instance (ToSql a, FromSql a, ToSql b, FromSql b, ToSql c, FromSql c) => SqlRow 
   toRow (a, b, c) = [toSql a, toSql b, toSql c]
   fromRow [a, b, c] = (fromSql a, fromSql b, fromSql c)
 
-  
+
 instance Arbitrary (DecimalRaw Integer) where
   arbitrary = Decimal <$> arbitrary <*> arbitrary
 
@@ -97,6 +97,7 @@ createTables tf con = do
     ]
   recreateTable "intdec" [tfInteger tf, tfDecimal tf]
   recreateTable "intublobs" [tfInteger tf, tfUUID tf, tfBlob tf]
+  recreateTable "table1" [tfInteger tf, tfInteger tf, tfInteger tf]
   where
     recreateTable tname fnames = do
       runRaw con $ "DROP TABLE IF EXISTS " <> tname
@@ -110,6 +111,7 @@ createTables tf con = do
 allTestsGroup :: (Connection con) => con -> Test
 allTestsGroup con = testGroup "tests from package"
                     [ insertSelectTests con
+                    , testCases con
                     ]
 
 insertSelectTests :: (Connection con) => con -> Test
@@ -137,17 +139,6 @@ insertSelectTests c = testGroup "Can insert and select"
              $ \(x :: [(Maybe Integer, UUID, Maybe B.ByteString)]) -> setsEqual c "intublobs" x
            ]
 
-
-
-runInsertSelect :: (FromSql a, ToSql a, Connection con) => con -> Query -> a -> IO a
-runInsertSelect conn tname val = withTransaction conn $ do
-  runRaw conn $ "delete from " <> tname
-  run conn ("insert into " <> tname <> "(val1) values (?)") [toSql val]
-  withStatement conn ("select val1 from " <> tname) $ \st -> do
-    executeRaw st
-    [[ret]] <- fetchAllRows st
-    return $ fromSql ret
-
 setsEqual :: (Connection con, SqlRow row, Eq row, Ord row, Show row) => con -> Query -> [row] -> Property
 setsEqual conn tname values = QM.monadicIO $ do
   ret <- QM.run $ withTransaction conn $ do
@@ -158,7 +149,7 @@ setsEqual conn tname values = QM.monadicIO $ do
       executeRaw st
       r <- fetchAllRows st
       return $ map fromRow r
-  
+
   QM.stop $ (S.fromList values) ==? (S.fromList ret)
   where
     valnames = Query $ TL.pack $ intercalate ", "
@@ -176,6 +167,15 @@ approxEqual :: (Show a, AEq a, FromSql a, ToSql a, Connection con) => con -> Que
 approxEqual conn tname val = QM.monadicIO $ do
   res <- QM.run $ runInsertSelect conn tname val
   QM.stop $ res ?~== val
+
+runInsertSelect :: (FromSql a, ToSql a, Connection con) => con -> Query -> a -> IO a
+runInsertSelect conn tname val = withTransaction conn $ do
+  runRaw conn $ "delete from " <> tname
+  run conn ("insert into " <> tname <> "(val1) values (?)") [toSql val]
+  withStatement conn ("select val1 from " <> tname) $ \st -> do
+    executeRaw st
+    [[ret]] <- fetchAllRows st
+    return $ fromSql ret
 
 -- | Generate Text without 'NUL' symbols
 genText :: Gen TL.Text
@@ -205,74 +205,55 @@ anyToMicro :: (Fractional b, Real a) => a -> b
 anyToMicro a = fromRational $ toRational ((fromRational $ toRational a) :: Micro)
 
 
+-- | Check whether statement status changing properly or not
+stmtStatus :: (Connection con) => con -> Assertion
+stmtStatus c = do
+  runRaw c "delete from integers"
+  s <- prepare c "select * from integers"
+  statementStatus s >>= (@?= StatementNew)
+  executeRaw s
+  statementStatus s >>= (@?= StatementExecuted)
+  _ <- fetchRow s
+  statementStatus s >>= (@?= StatementFetched)
+  finish s
+  statementStatus s >>= (@?= StatementFinished)
+  reset s
+  statementStatus s >>= (@?= StatementNew)
 
--- stmtStatus :: PostgreConnection -> Assertion
--- stmtStatus c = do
---   runRaw c "drop table table1"
---   runRaw c "create table table1 (val bigint)" -- Just for postgre 9
---   s <- prepare c "select * from table1"
---   statementStatus s >>= (@?= StatementNew)
---   executeRaw s
---   statementStatus s >>= (@?= StatementExecuted)
---   _ <- fetchRow s
---   statementStatus s >>= (@?= StatementFetched)
---   finish s
---   statementStatus s >>= (@?= StatementFinished)
---   reset s
---   statementStatus s >>= (@?= StatementNew)
+-- | Check whether `inTransaction` return True inside transaction or not
+inTransactionStatus :: (Connection con) => con -> Assertion
+inTransactionStatus c = do
+  inTransaction c >>= (@?= False)
+  withTransaction c $ do
+    inTransaction c >>= (@?= True)
 
--- inTransactionStatus :: PostgreConnection -> Assertion
--- inTransactionStatus c = do
---   inTransaction c >>= (@?= False)
---   withTransaction c $ do
---     inTransaction c >>= (@?= True)
+-- | Fresh connection has good status
+connStatusGood :: (Connection con) => con -> Assertion
+connStatusGood c = connStatus c >>= (@?= ConnOK)
 
--- connStatusGood :: PostgreConnection -> Assertion
--- connStatusGood c = connStatus c >>= (@?= ConnOK)
+-- | `clone` creates new independent connection
+connClone :: (Connection con) => con -> Assertion
+connClone c = do
+  newc <- clone c
+  connStatus newc >>= (@?= ConnOK)
+  withTransaction newc $ inTransaction c >>= (@?= False)
+  withTransaction c $ inTransaction newc >>= (@?= False)
+  disconnect newc
+  connStatus newc >>= (@?= ConnDisconnected)
 
--- connClone :: PostgreConnection -> Assertion
--- connClone c = do
---   newc <- clone c
---   connStatus newc >>= (@?= ConnOK)
---   withTransaction newc $ inTransaction c >>= (@?= False)
---   withTransaction c $ inTransaction newc >>= (@?= False)
---   disconnect newc
---   connStatus newc >>= (@?= ConnDisconnected)
+-- | Checks that `getColumnNames` and `getColumnsCount` return right result
+checkColumnNames :: (Connection con) => con -> Assertion
+checkColumnNames c = do
+  withStatement c "select val1, val2, val3 from table1" $ \s -> do
+    executeRaw s
+    getColumnNames s >>= (@?= ["val1", "val2", "val3"])
+    getColumnsCount s >>= (@?= 3)
 
--- checkColumnNames :: PostgreConnection -> Assertion
--- checkColumnNames c = do
---   withTransaction c $ do
---     runRaw c "drop table if exists table1"
---     runRaw c "create table table1 (val1 bigint, val2 bigint, val3 bigint)"
---     s <- prepare c "select val1, val2, val3 from table1"
---     executeRaw s
---     getColumnNames s >>= (@?= ["val1", "val2", "val3"])
---     getColumnsCount s >>= (@?= 3)
---     finish s
-
--- testG3 :: PostgreConnection -> Test
--- testG3 c = testGroup "Fixed tests"
---            [ testCase "Statement status" $ stmtStatus c
---            , testCase "inTransaction return right value" $ inTransactionStatus c
---            , testCase "Connection status is good" $ connStatusGood c
---            , testCase "Connection clone works" $ connClone c
---            , testCase "Check driver name" $ hdbiDriverName c @?= "postgresql"
---            , testCase "Check transaction support" $ dbTransactionSupport c @?= True
---            , testCase "Check right column names" $ checkColumnNames c
---            ]
-
--- main :: IO ()
--- main = do
---   a <- getArgs
---   case a of
---     (conn:args) -> do
---       c <- connectPostgreSQL $ TL.pack conn
---       (flip defaultMainWithArgs) args [ testG1 c
---                                       , testG3 c
---                                       ]
---       disconnect c
-
---     _ -> do
---       mapM_ putStrLn [ "Need at least one argument as connection string"
---                      , "the rest will be passed as arguments to test-framework"]
---       exitWith $ ExitFailure 1
+testCases :: (Connection con) => con -> Test
+testCases c = testGroup "Fixed tests"
+           [ testCase "Statement status" $ stmtStatus c
+           , testCase "inTransaction return right value" $ inTransactionStatus c
+           , testCase "Connection status is good" $ connStatusGood c
+           , testCase "Connection clone works" $ connClone c
+           , testCase "Check right column names" $ checkColumnNames c
+           ]
