@@ -16,7 +16,7 @@ import Data.AEq
 import Data.Decimal
 import Data.Int
 import Data.Monoid
-import Data.List (intercalate)
+import Data.List (intercalate, sort)
 import Data.Fixed
 import Data.Time
 import Data.UUID
@@ -42,11 +42,12 @@ class SqlRow a where
 instance (ToSql a, FromSql a, ToSql b, FromSql b) => SqlRow (a, b) where
   toRow (a, b) = [toSql a, toSql b]
   fromRow [a, b] = (fromSql a, fromSql b) -- quick and dirty - just for tests
+  fromRow _ = error "FromRow: too few elemtns in the list must be 2"
 
 instance (ToSql a, FromSql a, ToSql b, FromSql b, ToSql c, FromSql c) => SqlRow (a, b, c) where
   toRow (a, b, c) = [toSql a, toSql b, toSql c]
   fromRow [a, b, c] = (fromSql a, fromSql b, fromSql c)
-
+  fromRow _ = error "FromRow: too few elemtns in the list must be 3"
 
 instance Arbitrary (DecimalRaw Integer) where
   arbitrary = Decimal <$> arbitrary <*> arbitrary
@@ -104,15 +105,45 @@ createTables tf con = do
       runRaw con $ "CREATE TABLE " <> tname <> " (" <> vals <> ")"
       where
         vals = Query $ TL.pack $ intercalate ", "
-               $ map (\(col, fname) -> "val" ++ show col ++ " " ++ (TL.unpack $ unQuery fname))
+               $ map (\(col :: Int, fname) -> "val" ++ show col ++ " " ++ (TL.unpack $ unQuery fname))
                $ zip [1..] fnames
     shortRC (tname, func) = recreateTable tname [func tf]
 
 allTestsGroup :: (Connection con) => con -> Test
 allTestsGroup con = testGroup "tests from package"
                     [ insertSelectTests con
+                    , functionalProperties con
                     , testCases con
                     ]
+
+functionalProperties :: (Connection con) => con -> Test
+functionalProperties con = testGroup "Functional properties"
+                           [ testProperty "select sum of integers" $ selectSumIntegers con
+                           , testProperty "select ordered list" $ selectOrderedList con
+                           ]
+
+selectSumIntegers :: (Connection con) => con -> NonEmptyList Int32 -> Property
+selectSumIntegers con v = QM.monadicIO $ do
+  let vals = getNonEmpty v
+  res <- QM.run $ withTransaction con $ do
+    runRaw con "delete from integers"
+    runMany con "insert into integers(val1) values (?)" $ map ((:[]) . toSql) vals
+    withStatement con "select sum(val1) from integers" $ \st -> do
+      executeRaw st
+      [[r]] <- fetchAllRows st
+      return $ fromSql r
+  QM.stop $ res ?== (sum $ map toInteger vals)
+
+selectOrderedList :: (Connection con) => con -> [Int32] -> Property
+selectOrderedList con vals = QM.monadicIO $ do
+  res <- QM.run $ withTransaction con $ do
+    runRaw con "delete from integers"
+    runMany con "insert into integers(val1) values (?)" $ map ((:[]) . toSql) vals
+    withStatement con "select val1 from integers order by val1" $ \st -> do
+      executeRaw st
+      r <- fetchAllRows st
+      return $ map (\[x] -> fromSql x) r
+  QM.stop $ res ?== (sort vals)
 
 insertSelectTests :: (Connection con) => con -> Test
 insertSelectTests c = testGroup "Can insert and select"
@@ -213,7 +244,7 @@ stmtStatus c = do
   statementStatus s >>= (@?= StatementNew)
   executeRaw s
   statementStatus s >>= (@?= StatementExecuted)
-  _ <- fetchRow s
+  Nothing <- fetchRow s
   statementStatus s >>= (@?= StatementFetched)
   finish s
   statementStatus s >>= (@?= StatementFinished)
