@@ -25,7 +25,7 @@ library
   exposed-modules:     Database.HDBI.Tests
   ghc-options: -Wall -fno-warn-orphans
   ghc-prof-options: -auto-all
-  build-depends:       base ==4.5.*
+  build-depends:       base < 5
                      , Decimal >= 0.2.1
                      , HUnit
                      , QuickCheck
