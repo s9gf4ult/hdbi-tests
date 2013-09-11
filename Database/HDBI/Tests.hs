@@ -11,13 +11,18 @@ module Database.HDBI.Tests
        , allTests
        ) where
 
+
 import Control.Applicative
+import Control.Concurrent
+import Control.Concurrent.STM.TVar
+import Control.Monad
+import Control.Monad.STM
 import Data.AEq
 import Data.Decimal
-import Data.Int
-import Data.Monoid
-import Data.List (intercalate, sort)
 import Data.Fixed
+import Data.Int
+import Data.List (intercalate, sort)
+import Data.Monoid
 import Data.Time
 import Data.UUID
 import Data.Word
@@ -280,6 +285,28 @@ checkColumnNames c = do
     getColumnNames s >>= (@?= ["val1", "val2", "val3"])
     getColumnsCount s >>= (@?= 3)
 
+concurrentInserts :: (Connection con) => con -> Assertion
+concurrentInserts c = do
+  let threads = 1000
+  v <- newTVarIO threads
+  withTransaction c $ do
+    runRaw c "delete from integers"
+    replicateM_ threads $ forkIO $ onethread v
+    atomically $ do               -- wait until all threads done
+      x <- readTVar v
+      when (x > 0) retry
+  a <- withStatement c "select sum(val1) from integers" $ \st -> do
+    executeRaw st
+    [[res]] <- fetchAllRows st
+    return $ fromSql res
+  a @?= threads
+
+  where
+    onethread var = do
+      run c "insert into integers (val1) values (?)" [toSql (1 :: Int)]
+      atomically $ modifyTVar var (\a -> a - 1)
+      return ()
+
 testCases :: (Connection con) => con -> Test
 testCases c = testGroup "Fixed tests"
            [ testCase "Statement status" $ stmtStatus c
@@ -287,4 +314,5 @@ testCases c = testGroup "Fixed tests"
            , testCase "Connection status is good" $ connStatusGood c
            , testCase "Connection clone works" $ connClone c
            , testCase "Check right column names" $ checkColumnNames c
+           , testCase "Concurent inserts dont fail" $ concurrentInserts c
            ]
