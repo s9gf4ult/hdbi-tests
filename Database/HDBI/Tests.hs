@@ -39,21 +39,6 @@ import qualified Data.Set as S
 import qualified Data.Text.Lazy as TL
 import qualified Test.QuickCheck.Monadic as QM
 
--- | Auxiliary class to simplify tests writing
-class SqlRow a where
-  toRow :: a -> [SqlValue]
-  fromRow :: [SqlValue] -> a
-
-instance (ToSql a, FromSql a, ToSql b, FromSql b) => SqlRow (a, b) where
-  toRow (a, b) = [toSql a, toSql b]
-  fromRow [a, b] = (fromSql a, fromSql b) -- quick and dirty - just for tests
-  fromRow _ = error "FromRow: too few elemtns in the list must be 2"
-
-instance (ToSql a, FromSql a, ToSql b, FromSql b, ToSql c, FromSql c) => SqlRow (a, b, c) where
-  toRow (a, b, c) = [toSql a, toSql b, toSql c]
-  fromRow [a, b, c] = (fromSql a, fromSql b, fromSql c)
-  fromRow _ = error "FromRow: too few elemtns in the list must be 3"
-
 instance Arbitrary (DecimalRaw Integer) where
   arbitrary = Decimal <$> arbitrary <*> arbitrary
 
@@ -175,7 +160,7 @@ insertSelectTests c = testGroup "Can insert and select"
              $ \(x :: [(Maybe Integer, UUID, Maybe B.ByteString)]) -> setsEqual c "intublobs" 3 x
            ]
 
-setsEqual :: (Connection con, SqlRow row, Eq row, Ord row, Show row) => con -> Query -> Int -> [row] -> Property
+setsEqual :: (Connection con, Eq row, Ord row, Show row, ToRow row, FromRow row) => con -> Query -> Int -> [row] -> Property
 setsEqual conn tname vcount values = QM.monadicIO $ do
   ret <- QM.run $ withTransaction conn $ do
     runRaw conn $ "delete from " <> tname
@@ -183,8 +168,7 @@ setsEqual conn tname vcount values = QM.monadicIO $ do
       $ map toRow values
     withStatement conn ("select " <> valnames <> " from " <> tname) $ \st -> do
       executeRaw st
-      r <- fetchAllRows st
-      return $ map fromRow r
+      fetchAllRows st
 
   QM.stop $ (S.fromList values) ==? (S.fromList ret)
   where
@@ -249,7 +233,7 @@ stmtStatus c = do
   statementStatus s >>= (@?= StatementNew)
   executeRaw s
   statementStatus s >>= (@?= StatementExecuted)
-  Nothing <- fetchRow s
+  Nothing <- fetch s
   statementStatus s >>= (@?= StatementFetched)
   finish s
   statementStatus s >>= (@?= StatementFinished)
