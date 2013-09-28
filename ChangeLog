@@ -1,3 +1,7 @@
+hdbi-tests-1.2.0
+
+	* FromRow and ToRow typeclasses used in tests
+
 hdbi-tests-1.1.1
 
 	* concurrentInserts: check that 1000 concurrent inserts are not fail.
