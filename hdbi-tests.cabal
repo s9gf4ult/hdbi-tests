@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                hdbi-tests
-version:             1.1.1
+version:             1.2.0
 synopsis:            test suite for testing HDBI
 description:         The set of database-independent tests for
   testing the common interface implementation by drivers.
@@ -31,7 +31,7 @@ library
                      , QuickCheck
                      , bytestring
                      , containers
-                     , hdbi >= 1.1.0
+                     , hdbi >= 1.2.0
                      , ieee754
                      , quickcheck-assertions
                      , quickcheck-instances
