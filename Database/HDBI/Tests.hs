@@ -35,6 +35,7 @@ import Test.QuickCheck
 import Test.QuickCheck.Assertions
 import Test.QuickCheck.Instances ()
 import qualified Data.ByteString as B
+import qualified Data.Foldable as F
 import qualified Data.Set as S
 import qualified Data.Text.Lazy as TL
 import qualified Test.QuickCheck.Monadic as QM
@@ -91,8 +92,8 @@ createTables tf con = do
   recreateTable "table1" [tfInteger tf, tfInteger tf, tfInteger tf]
   where
     recreateTable tname fnames = do
-      runRaw con $ "DROP TABLE IF EXISTS " <> tname
-      runRaw con $ "CREATE TABLE " <> tname <> " (" <> vals <> ")"
+      run con ("DROP TABLE IF EXISTS " <> tname) ()
+      run con ("CREATE TABLE " <> tname <> " (" <> vals <> ")") ()
       where
         vals = Query $ TL.pack $ intercalate ", "
                $ map (\(col :: Int, fname) -> "val" ++ show col ++ " " ++ (TL.unpack $ unQuery fname))
@@ -115,25 +116,19 @@ functionalProperties con = testGroup "Functional properties"
 selectSumIntegers :: (Connection con) => con -> NonEmptyList Int32 -> Property
 selectSumIntegers con v = QM.monadicIO $ do
   let vals = getNonEmpty v
-  res <- QM.run $ withTransaction con $ do
-    runRaw con "delete from integers"
-    runMany con "insert into integers(val1) values (?)" $ map ((:[]) . toSql) vals
-    withStatement con "select sum(val1) from integers" $ \st -> do
-      executeRaw st
-      [[r]] <- fetchAllRows st
-      return $ fromSql r
+  Just res <- QM.run $ withTransaction con $ do
+    run con "delete from integers" ()
+    runMany con "insert into integers(val1) values (?)" $ map one vals
+    runFetchOne con "select sum(val1) from integers" ()
   QM.stop $ res ?== (sum $ map toInteger vals)
 
 selectOrderedList :: (Connection con) => con -> [Int32] -> Property
 selectOrderedList con vals = QM.monadicIO $ do
   res <- QM.run $ withTransaction con $ do
-    runRaw con "delete from integers"
-    runMany con "insert into integers(val1) values (?)" $ map ((:[]) . toSql) vals
-    withStatement con "select val1 from integers order by val1" $ \st -> do
-      executeRaw st
-      r <- fetchAllRows st
-      return $ map (\[x] -> fromSql x) r
-  QM.stop $ res ?== (sort vals)
+    run con "delete from integers" ()
+    runMany con "insert into integers(val1) values (?)" $ map one vals
+    runFetchAll con "select val1 from integers order by val1" ()
+  QM.stop $ (map unone $ F.toList res) ?== (sort vals)
 
 insertSelectTests :: (Connection con) => con -> Test
 insertSelectTests c = testGroup "Can insert and select"
@@ -163,14 +158,14 @@ insertSelectTests c = testGroup "Can insert and select"
 setsEqual :: (Connection con, Eq row, Ord row, Show row, ToRow row, FromRow row) => con -> Query -> Int -> [row] -> Property
 setsEqual conn tname vcount values = QM.monadicIO $ do
   ret <- QM.run $ withTransaction conn $ do
-    runRaw conn $ "delete from " <> tname
-    runMany conn ("insert into " <> tname <> "(" <> valnames <> ") values (" <> qmarks <> ")")
-      $ map toRow values
-    withStatement conn ("select " <> valnames <> " from " <> tname) $ \st -> do
-      executeRaw st
-      fetchAllRows st
+    run conn ("delete from " <> tname) ()
+    runMany
+      conn
+      ("insert into " <> tname <> "(" <> valnames <> ") values (" <> qmarks <> ")")
+      values
+    runFetchAll conn ("select " <> valnames <> " from " <> tname) ()
 
-  QM.stop $ (S.fromList values) ==? (S.fromList ret)
+  QM.stop $ (S.fromList values) ==? (S.fromList $ F.toList ret)
   where
     valnames = Query $ TL.pack $ intercalate ", "
                $ map (\c -> "val" ++ show c) [1..vcount]
@@ -188,14 +183,12 @@ approxEqual conn tname val = QM.monadicIO $ do
   res <- QM.run $ runInsertSelect conn tname val
   QM.stop $ res ?~== val
 
-runInsertSelect :: (FromSql a, ToSql a, Connection con) => con -> Query -> a -> IO a
+runInsertSelect :: (ToSql a, FromSql a, Connection con) => con -> Query -> a -> IO a
 runInsertSelect conn tname val = withTransaction conn $ do
-  runRaw conn $ "delete from " <> tname
-  run conn ("insert into " <> tname <> "(val1) values (?)") [toSql val]
-  withStatement conn ("select val1 from " <> tname) $ \st -> do
-    executeRaw st
-    [[ret]] <- fetchAllRows st
-    return $ fromSql ret
+  run conn ("delete from " <> tname) ()
+  run conn ("insert into " <> tname <> "(val1) values (?)") $ one val
+  [ret] <- F.toList <$> runFetchAll conn ("select val1 from " <> tname) ()
+  return $ unone ret
 
 -- | Generate Text without 'NUL' symbols
 genText :: Gen TL.Text
@@ -228,12 +221,12 @@ anyToMicro a = fromRational $ toRational ((fromRational $ toRational a) :: Micro
 -- | Check whether statement status changing properly or not
 stmtStatus :: (Connection con) => con -> Assertion
 stmtStatus c = do
-  runRaw c "delete from integers"
+  run c "delete from integers" ()
   s <- prepare c "select * from integers"
   statementStatus s >>= (@?= StatementNew)
-  executeRaw s
+  execute s ()
   statementStatus s >>= (@?= StatementExecuted)
-  Nothing <- fetch s
+  Nothing :: Maybe () <- fetch s
   statementStatus s >>= (@?= StatementFetched)
   finish s
   statementStatus s >>= (@?= StatementFinished)
@@ -265,7 +258,7 @@ connClone c = do
 checkColumnNames :: (Connection con) => con -> Assertion
 checkColumnNames c = do
   withStatement c "select val1, val2, val3 from table1" $ \s -> do
-    executeRaw s
+    execute s ()
     getColumnNames s >>= (@?= ["val1", "val2", "val3"])
     getColumnsCount s >>= (@?= 3)
 
@@ -274,20 +267,17 @@ concurrentInserts c = do
   let threads = 1000
   v <- newTVarIO threads
   withTransaction c $ do
-    runRaw c "delete from integers"
+    run c "delete from integers" ()
     replicateM_ threads $ forkIO $ onethread v
     atomically $ do               -- wait until all threads done
       x <- readTVar v
       when (x > 0) retry
-  a <- withStatement c "select sum(val1) from integers" $ \st -> do
-    executeRaw st
-    [[res]] <- fetchAllRows st
-    return $ fromSql res
+  Just a <- runFetchOne c "select sum(val1) from integers" ()
   a @?= threads
 
   where
     onethread var = do
-      run c "insert into integers (val1) values (?)" [toSql (1 :: Int)]
+      run c "insert into integers (val1) values (?)" $ onei 1
       atomically $ modifyTVar var (\a -> a - 1)
       return ()
 
